@@ -1,0 +1,282 @@
+{
+  "name": "IDX - 02 ETL Intraday 5m → Daily [v1.116.2] Initial Data",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "id": "7d405fdf-323e-409a-bf7c-20a99dbdc833",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT symbol FROM dim_symbol \nwhere symbol not in (SELECT symbol from fact_daily_ohlcv)\nORDER BY symbol;",
+        "options": {}
+      },
+      "id": "42487003-1ed8-4ffa-b569-a084155f0cd9",
+      "name": "PG_GetSymbols",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        256,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "LBAbw4MHazUVAbpK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const API_TOKEN = $env.EODHD_API_TOKEN;\nconst from = Math.floor(new Date(\"2025-07-01\").getTime() / 1000);\nconst to = Math.floor(new Date().getTime() / 1000);\nconst out = [];\n\nfor (const item of items) {\n  const s = item.json.symbol;\n  out.push({\n    json: {\n      symbol: s,\n      url: `https://eodhd.com/api/intraday/${s}?interval=5m&from=${from}&to=${to}&fmt=json&api_token=68fd98447aeb75.82064885`\n    }\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "77f4ab34-4761-445a-b994-2d0e66edb8f0",
+      "name": "Fn_URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.url}}",
+        "options": {}
+      },
+      "id": "681157c6-e1ee-4de2-8292-0f5594dc6874",
+      "name": "HTTP_Intra",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        800,
+        16
+      ],
+      "notesInFlow": false,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all items from previous node that contains symbol\nconst symbolItems = $(\"Fn_URLs\").all(); // Replace \"Fn_URLs\" with your actual node name\n\n// Get symbol from the first item of that node\nconst symbol = symbolItems[0]?.json.symbol || symbolItems[0]?.json.Symbol || '';\n\n// Process current node data\nconst bars = Array.isArray(items[0].json) ? items[0].json : items.map(i => i.json);\n\n// Output array with symbol attached to each bar\nconst results = bars.map(bar => {\n  return {\n    json: {\n      symbol: symbol, // Use the symbol from previous node\n      timestamp: bar.timestamp,\n      gmtoffset: bar.gmtoffset,\n      datetime: bar.datetime,\n      open: bar.open,\n      high: bar.high,\n      low: bar.low,\n      close: bar.close,\n      volume: bar.volume\n    }\n  };\n});\n\nreturn results;"
+      },
+      "id": "9b52cae5-b6d1-4c48-9eea-c199ef830494",
+      "name": "Fn_Rollup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        16
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO fact_daily_ohlcv(symbol, date, open, high, low, close, volume)\nVALUES (\n  '{{$json[\"symbol\"]}}',\n  (TIMESTAMP WITH TIME ZONE '{{$json[\"datetime\"]}}' AT TIME ZONE 'Asia/Jakarta'),\n  {{$json[\"open\"] ?? 'NULL'}},\n  {{$json[\"high\"] ?? 'NULL'}},\n  {{$json[\"low\"] ?? 'NULL'}},\n  {{$json[\"close\"] ?? 'NULL'}},\n  {{$json[\"volume\"] ?? 'NULL'}}\n)\nON CONFLICT(symbol, date) DO UPDATE SET\n  open = EXCLUDED.open,\n  high = EXCLUDED.high,\n  low = EXCLUDED.low,\n  close = EXCLUDED.close,\n  volume = EXCLUDED.volume;\n",
+        "options": {}
+      },
+      "id": "116abe17-219f-4613-a82e-a3c10baf94e1",
+      "name": "PG_UpsertDaily",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        16
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "LBAbw4MHazUVAbpK",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        416,
+        80
+      ],
+      "id": "c09d1e94-6a0b-4622-82e8-17e72b80ace7",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "chatId": "239469180",
+        "text": "=🔥 *Workflow Ingesttion Data Done!* \n🕒 *Time:* {{$now}}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        608,
+        -128
+      ],
+      "id": "5828be40-66b6-4653-9605-6a52aa93b190",
+      "name": "Send a text message",
+      "webhookId": "38c0f188-ded8-414b-9bca-a4a1295803df",
+      "credentials": {
+        "telegramApi": {
+          "id": "AXbOBbEhXOxitdqy",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "ba8f0859-5d28-4a87-bf32-a5470f498660",
+      "name": "Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        1296,
+        288
+      ],
+      "webhookId": "fbb569b7-fbdd-4dc9-b93f-93365aab9faa",
+      "alwaysOutputData": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "PG_GetSymbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG_GetSymbols": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_URLs": {
+      "main": [
+        [
+          {
+            "node": "HTTP_Intra",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_Intra": {
+      "main": [
+        [
+          {
+            "node": "Fn_Rollup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fn_Rollup": {
+      "main": [
+        [
+          {
+            "node": "PG_UpsertDaily",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG_UpsertDaily": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fn_URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "1nHDCLshMV7QL6Q6"
+  },
+  "versionId": "9e86ebf1-e410-4cde-aa68-a474fb760395",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b54b3cd9972c6762ce7475ea22feb55f47c42101d805247d30add3d5ec4bbc14"
+  },
+  "id": "zXONJ2uzmWsrAdSa",
+  "tags": [
+    {
+      "createdAt": "2025-10-27T09:26:55.664Z",
+      "updatedAt": "2025-10-27T09:26:55.664Z",
+      "id": "1g3IPd0o3zosS1r9",
+      "name": "stock_project"
+    }
+  ]
+}

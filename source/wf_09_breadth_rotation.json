@@ -1,0 +1,62 @@
+{
+  "name": "IDX - 09 Breadth & Rotation [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 16,
+            "minute": 55
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH last AS ( SELECT MAX(date) AS d FROM fact_daily_ohlcv ),\ntoday AS (\n  SELECT d.symbol, d.date, d.close,\n         LAG(d.close) OVER (PARTITION BY d.symbol ORDER BY d.date) AS prev_close\n  FROM fact_daily_ohlcv d, last\n  WHERE d.date = last.d\n),\nmoves AS (\n  SELECT\n    SUM(CASE WHEN close>prev_close THEN 1 ELSE 0 END) AS adv,\n    SUM(CASE WHEN close<prev_close THEN 1 ELSE 0 END) AS dec,\n    SUM(CASE WHEN close=prev_close THEN 1 ELSE 0 END) AS no_change\n  FROM today\n),\nma_flags AS (\n  SELECT t.symbol, t.date, d.close,\n         CASE WHEN d.close>ti.sma_20 THEN 1 ELSE 0 END AS above20,\n         CASE WHEN d.close>ti.sma_50 THEN 1 ELSE 0 END AS above50\n  FROM fact_daily_ohlcv d\n  JOIN fact_tech_indicators ti USING(symbol,date)\n  JOIN today t ON t.symbol=d.symbol AND t.date=d.date\n),\nagg AS (\n  SELECT (SELECT d FROM last) AS date,\n         (SELECT adv FROM moves) AS adv, (SELECT dec FROM moves) AS dec, (SELECT no_change FROM moves) AS no_change,\n         (SELECT adv::numeric/NULLIF(dec,0) FROM moves) AS adv_dec_ratio,\n         AVG(above20)::numeric AS pct_above_ma20, AVG(above50)::numeric AS pct_above_ma50\n  FROM ma_flags\n)\nINSERT INTO fact_breadth_daily(date,adv,dec,no_change,adv_dec_ratio,pct_above_ma20,pct_above_ma50)\nSELECT date,adv,dec,no_change,adv_dec_ratio,pct_above_ma20,pct_above_ma50 FROM agg\nON CONFLICT (date) DO UPDATE SET\n  adv=EXCLUDED.adv, dec=EXCLUDED.dec, no_change=EXCLUDED.no_change,\n  adv_dec_ratio=EXCLUDED.adv_dec_ratio, pct_above_ma20=EXCLUDED.pct_above_ma20, pct_above_ma50=EXCLUDED.pct_above_ma50;\n\n-- Weekly sector rotation snapshot (runs fine even if sector missing; then momentum becomes NULL and ignored downstream)\nWITH wk AS ( SELECT date_trunc('week', (SELECT MAX(date) FROM fact_daily_ohlcv))::date AS ws ),\nflags AS (\n  SELECT d.symbol, ds.sector, d.date, d.close,\n         CASE WHEN d.close>ti.sma_20 THEN 1 ELSE 0 END AS above20,\n         CASE WHEN d.close>ti.sma_50 THEN 1 ELSE 0 END AS above50,\n         LAG(d.close,5) OVER (PARTITION BY d.symbol ORDER BY d.date) AS close_5ago\n  FROM fact_daily_ohlcv d\n  JOIN fact_tech_indicators ti USING(symbol,date)\n  LEFT JOIN dim_symbol ds USING(symbol)\n  WHERE d.date BETWEEN (SELECT ws FROM wk) AND (SELECT ws FROM wk) + INTERVAL '4 day'\n),\nper_sec AS (\n  SELECT (SELECT ws FROM wk) AS week_start, sector,\n         AVG(above20)::numeric AS pct_above_ma20,\n         AVG(above50)::numeric AS pct_above_ma50,\n         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (close/NULLIF(close_5ago,0)-1)) AS momentum_1w,\n         NULL::numeric AS momentum_4w\n  FROM flags\n  GROUP BY sector\n)\nINSERT INTO fact_sector_rotation_weekly(week_start,sector,pct_above_ma20,pct_above_ma50,momentum_1w,momentum_4w)\nSELECT * FROM per_sec\nON CONFLICT (week_start,sector) DO UPDATE SET\n  pct_above_ma20=EXCLUDED.pct_above_ma20, pct_above_ma50=EXCLUDED.pct_above_ma50,\n  momentum_1w=EXCLUDED.momentum_1w, momentum_4w=EXCLUDED.momentum_4w;\n"
+      },
+      "id": "PG_Breadth",
+      "name": "PG_Breadth",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        600,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Breadth",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.112112Z"
+  }
+}

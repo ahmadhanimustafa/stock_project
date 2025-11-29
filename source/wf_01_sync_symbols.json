@@ -1,0 +1,132 @@
+{
+  "name": "IDX - 01 Sync Symbols (All IDX via EODHD) [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 8,
+            "minute": 0
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst token = $env.EODHD_API_TOKEN;\nreturn [{ json: { url: `https://eodhd.com/api/exchange-symbol-list/IDX?api_token=${token}&fmt=json` } }];\n"
+      },
+      "id": "Build_URL",
+      "name": "Build_URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "none",
+        "requestMethod": "GET",
+        "url": "={{$json.url}}",
+        "sendBinaryData": false,
+        "jsonParameters": false
+      },
+      "id": "HTTP_List",
+      "name": "HTTP_List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        760,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst arr = Array.isArray(items[0].json) ? items[0].json : items.map(i=>i.json);\nconst rows = (Array.isArray(arr) ? arr : []).filter(r => {\n  const t = (r.Type || r.type || '').toLowerCase();\n  return t.includes('stock');\n}).map(r => ({\n  json: {\n    symbol: (r.Code || r.code || '').replace('.JK','') || r.Code || r.code,\n    name: r.Name || r.name || null,\n    sector: r.Sector || r.sector || null\n  }\n}));\nreturn rows;\n"
+      },
+      "id": "Map_Symbols",
+      "name": "Map_Symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO dim_symbol(symbol, name, sector)\nVALUES (:symbol, :name, :sector)\nON CONFLICT(symbol) DO UPDATE\nSET name=COALESCE(EXCLUDED.name, dim_symbol.name),\n    sector=COALESCE(EXCLUDED.sector, dim_symbol.sector);\n"
+      },
+      "id": "PG_Upsert",
+      "name": "PG_Upsert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "Build_URL",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Build_URL": {
+      "main": [
+        {
+          "node": "HTTP_List",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "HTTP_List": {
+      "main": [
+        {
+          "node": "Map_Symbols",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Map_Symbols": {
+      "main": [
+        {
+          "node": "PG_Upsert",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.107283Z"
+  }
+}

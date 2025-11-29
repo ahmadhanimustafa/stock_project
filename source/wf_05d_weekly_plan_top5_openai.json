@@ -1,0 +1,220 @@
+{
+  "name": "IDX - 05d Weekly Plan Top-5 (Risk/Reward) + OpenAI [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 9,
+            "minute": 0
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nWITH top5 AS (\n  SELECT symbol, week_start, risk_score, reward_score, rr_ratio\n  FROM v_risk_reward_score\n  WHERE week_start = date_trunc('week', CURRENT_DATE)::date\n  ORDER BY reward_score DESC, risk_score ASC, symbol\n  LIMIT 5\n),\nlatest AS ( SELECT symbol, MAX(date) AS d FROM fact_daily_ohlcv GROUP BY symbol ),\nref AS ( SELECT d.symbol, d.close AS ref_close FROM fact_daily_ohlcv d JOIN latest l ON d.symbol=l.symbol AND d.date=l.d ),\natr AS ( SELECT t.symbol, t.atr_14 FROM fact_tech_indicators t JOIN latest l ON t.symbol=l.symbol AND t.date=l.d )\nSELECT t.symbol, t.week_start, t.risk_score, t.reward_score, t.rr_ratio, r.ref_close, a.atr_14\nFROM top5 t JOIN ref r USING(symbol) JOIN atr a USING(symbol);\n"
+      },
+      "id": "PG_Top5",
+      "name": "PG_Top5",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        500,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst EQUITY = Number($env.PORTFOLIO_EQUITY || 100000000);\nconst RISK_PCT = Number($env.RISK_PCT || 0.005);\nconst out = [];\nfor (const it of items){ const r=it.json;\n  const atr = Number(r.atr_14||0), ref = Number(r.ref_close||0);\n  if (!atr || !ref) continue;\n  const entry_min = Math.max(ref*0.98, ref - 0.5*atr);\n  const entry_max = Math.min(ref*1.02, ref + 0.5*atr);\n  const stop_loss = ref - 1.5*atr;\n  const target_1  = ref + 1.5*atr;\n  const target_2  = ref + 3.0*atr;\n  const exposure_mult = (r.risk_score < 0.30 ? 1.0 : (r.risk_score < 0.60 ? 0.5 : 0.3));\n  const risk_per_share = Math.max(0.01, entry_min - stop_loss);\n  const position_sz = Math.round((RISK_PCT * EQUITY) / risk_per_share * exposure_mult);\n  out.push({ json: { symbol:r.symbol, week_start:r.week_start, entry_min, entry_max, stop_loss, target_1, target_2, position_sz,\n                     thesis:\"Top-5 R/R pick; validasi MA20/50 + volume\",\n                     risk_score:r.risk_score, reward_score:r.reward_score, rr_ratio:r.rr_ratio } });\n}\nreturn out;\n"
+      },
+      "id": "Fn_Build",
+      "name": "Fn_Build",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO fact_weekly_plan(symbol, week_start, thesis, entry_min, entry_max, stop_loss, target_1, target_2, position_sz, notes)\nVALUES (:symbol, :week_start, :thesis, :entry_min, :entry_max, :stop_loss, :target_1, :target_2, :position_sz, 'Top-5 R/R auto')\nON CONFLICT (symbol, week_start) DO UPDATE\nSET thesis=EXCLUDED.thesis, entry_min=EXCLUDED.entry_min, entry_max=EXCLUDED.entry_max,\n    stop_loss=EXCLUDED.stop_loss, target_1=EXCLUDED.target_1, target_2=EXCLUDED.target_2,\n    position_sz=EXCLUDED.position_sz, notes=EXCLUDED.notes;\n"
+      },
+      "id": "PG_UpsertPlan",
+      "name": "PG_UpsertPlan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst arr = items.map(i=>i.json);\nconst table = arr.map(r => `${r.symbol}\\tR:${r.risk_score.toFixed(2)}\\tW:${r.reward_score.toFixed(2)}\\tRR:${(r.rr_ratio||0).toFixed(2)}\\tEntry:${r.entry_min.toFixed(2)}\u2013${r.entry_max.toFixed(2)}\\tSL:${r.stop_loss.toFixed(2)}\\tTP1:${r.target_1.toFixed(2)}\\tTP2:${r.target_2.toFixed(2)}\\tSz:${r.position_sz}`).join(\"\\\\n\");\nconst prompt = `Anda analis saham Indonesia. Susun *Trading Plan Mingguan \u2014 Top 5 R/R* dengan heading:\nTHESIS / RISIKO / TRIGGER / SEKTOR (internal only).\nDATA:\nSYMBOL\\tRisk\\tReward\\tRR\\tEntry\\tSL\\tTP1\\tTP2\\tSize\n${table}`;\nreturn [{ json: { chat_id: $env.TELEGRAM_CHAT_ID, ai_prompt: prompt } }];\n"
+      },
+      "id": "Fn_PromptTop5",
+      "name": "Fn_PromptTop5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "chatInput": "={{$json.ai_prompt}}",
+        "additionalFields": {
+          "temperature": 0.3,
+          "maxTokens": 900
+        }
+      },
+      "id": "OpenAI_Weekly",
+      "name": "OpenAI_Weekly",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 5,
+      "position": [
+        1100,
+        380
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI (ChatGPT)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst ai = $json.data?.[0]?.message || $json.text || $json.choices?.[0]?.message?.content || '(AI kosong)';\nconst header = `\ud83d\uddd3\ufe0f Trading Plan \u2014 Top 5 R/R (Minggu ${new Date().toISOString().slice(0,10)})`;\nreturn [{ json: { chat_id: $env.TELEGRAM_CHAT_ID, text: header + \"\\n\\n\" + ai } }];\n"
+      },
+      "id": "Fn_ToTG",
+      "name": "Fn_ToTG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.chat_id}}",
+        "text": "={{$json.text}}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "TG_Send",
+      "name": "TG_Send",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        380
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Top5",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_Top5": {
+      "main": [
+        {
+          "node": "Fn_Build",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_Build": {
+      "main": [
+        {
+          "node": "PG_UpsertPlan",
+          "type": "main",
+          "index": 0
+        },
+        {
+          "node": "Fn_PromptTop5",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_PromptTop5": {
+      "main": [
+        {
+          "node": "OpenAI_Weekly",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "OpenAI_Weekly": {
+      "main": [
+        {
+          "node": "Fn_ToTG",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_ToTG": {
+      "main": [
+        {
+          "node": "TG_Send",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.116184Z"
+  }
+}

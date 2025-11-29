@@ -1,0 +1,173 @@
+{
+  "name": "IDX - 04c EOD + OpenAI (Guardrails) [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 17,
+            "minute": 5
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nWITH today AS (\n  SELECT d.symbol, d.date, d.open, d.high, d.low, d.close, d.volume\n  FROM fact_daily_ohlcv d WHERE d.date = CURRENT_DATE\n),\nplan AS (\n  SELECT p.symbol, p.week_start, p.entry_min, p.entry_max, p.stop_loss, p.target_1, p.target_2, p.position_sz, p.thesis\n  FROM fact_weekly_plan p WHERE p.week_start = date_trunc('week', CURRENT_DATE)::date\n),\ntouch AS (\n  SELECT t.symbol,\n         (t.low<=p.entry_max AND t.high>=p.entry_min) AS touched_entry,\n         (t.low<=p.stop_loss) AS hit_sl,\n         (t.high>=p.target_1) AS hit_t1,\n         (t.high>=p.target_2) AS hit_t2,\n         t.open,t.high,t.low,t.close,t.volume,p.*\n  FROM today t JOIN plan p USING(symbol)\n),\nscored AS (\n  SELECT symbol, week_start, thesis, entry_min, entry_max, stop_loss, target_1, target_2, position_sz,\n         open, high, low, close, volume,\n         CASE WHEN hit_t2 THEN 'TP2' WHEN hit_t1 THEN 'TP1' WHEN hit_sl THEN 'SL' WHEN touched_entry THEN 'ENTRY' ELSE 'WATCH' END AS status\n  FROM touch\n)\nSELECT s.*, ROUND(100.0*(close-open)/NULLIF(open,0),2) AS pct_day FROM scored s ORDER BY status, symbol;\n"
+      },
+      "id": "PG_EOD",
+      "name": "PG_EOD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        500,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst rows = $items('PG_EOD', 0).map(i=>i.json).slice(0, 30);\nconst lines = rows.map(r => `${r.symbol}\\t${r.status}\\t\u0394${(r.pct_day??0).toFixed(2)}%\\tC:${r.close}`).join(\"\\n\");\nconst prompt = `Tulis 3\u20136 bullet EOD untuk update trading plan harian.\n- Fokus ke progres plan (ENTRY/TP/SL/WATCH) & aksi besok (add/trim/hold).\n- Hanya pakai konteks internal. Dilarang sebut angka makro/sumber eksternal.\nDATA:\\nSYMBOL\\tSTATUS\\t\u0394%\\tCLOSE\\n${lines}`;\nreturn [{ json: { chat_id: $env.TELEGRAM_CHAT_ID, ai_prompt: prompt } }];\n"
+      },
+      "id": "Fn_Prompt",
+      "name": "Fn_Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "chatInput": "={{$json.ai_prompt}}",
+        "additionalFields": {
+          "temperature": 0.3,
+          "maxTokens": 900
+        }
+      },
+      "id": "OpenAI_EOD",
+      "name": "OpenAI_EOD",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 5,
+      "position": [
+        1100,
+        200
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI (ChatGPT)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst ai = $json.data?.[0]?.message || $json.text || $json.choices?.[0]?.message?.content || '(AI kosong)';\nconst header = `\ud83d\udcca EOD Update \u2014 ${new Date().toISOString().slice(0,10)}`;\nreturn [{ json: { chat_id: $env.TELEGRAM_CHAT_ID, text: header + \"\\n\\n\" + ai } }];\n"
+      },
+      "id": "Fn_ToTG",
+      "name": "Fn_ToTG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.chat_id}}",
+        "text": "={{$json.text}}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "TG_Send",
+      "name": "TG_Send",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_EOD",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_EOD": {
+      "main": [
+        {
+          "node": "Fn_Prompt",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_Prompt": {
+      "main": [
+        {
+          "node": "OpenAI_EOD",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "OpenAI_EOD": {
+      "main": [
+        {
+          "node": "Fn_ToTG",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_ToTG": {
+      "main": [
+        {
+          "node": "TG_Send",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.114063Z"
+  }
+}

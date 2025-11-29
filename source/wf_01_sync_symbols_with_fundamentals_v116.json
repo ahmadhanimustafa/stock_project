@@ -1,0 +1,317 @@
+{
+  "name": "IDX - 01 Sync Symbols + Fundamentals (JK) [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 8,
+            "minute": 0,
+            "weekday": "1"
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule (Mon 08:00 WIB)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "none",
+        "requestMethod": "GET",
+        "url": "https://eodhd.com/api/exchange-symbol-list/JK?fmt=json&api_token={{$env.EODHD_API_TOKEN}}",
+        "sendBinaryData": false,
+        "jsonParameters": false
+      },
+      "id": "HTTP_GetTickers",
+      "name": "HTTP_GetTickers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        520,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst arr = Array.isArray(items[0].json) ? items[0].json : [];\nconst rows = arr\n  .filter(r => (r.Type || '').toLowerCase().includes('stock'))\n  .map(r => {\n    const code = String(r.Code || '').trim();\n    const parts = code.split('.');\n    const base = parts[0] || code;\n    const ex = parts[1] || 'JK';\n    return { json: {\n      symbol: base,\n      exchange: ex,\n      name: r.Name || null,\n      sector_seed: r.Sector || null\n    }};\n  });\nreturn rows;\n"
+      },
+      "id": "Map_Symbols",
+      "name": "Map_Symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO dim_symbol(symbol, name, sector, last_synced_at)\nVALUES (:symbol, :name, NULLIF(:sector_seed,''), now())\nON CONFLICT(symbol) DO UPDATE\nSET name = COALESCE(EXCLUDED.name, dim_symbol.name),\n    sector = COALESCE(dim_symbol.sector, EXCLUDED.sector),\n    last_synced_at = now();\n",
+        "additionalFields": {
+          "queryParamsUi": {
+            "parameter": [
+              {
+                "name": "symbol",
+                "value": "={{$json.symbol}}"
+              },
+              {
+                "name": "name",
+                "value": "={{$json.name}}"
+              },
+              {
+                "name": "sector_seed",
+                "value": "={{$json.sector_seed}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "PG_UpsertSeed",
+      "name": "PG_UpsertSeed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 40
+      },
+      "id": "Split In Batches",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        200,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "none",
+        "requestMethod": "GET",
+        "url": "https://eodhd.com/api/fundamentals/{{$json.symbol}}.{{$json.exchange || 'JK'}}?fmt=json&api_token={{$env.EODHD_API_TOKEN}}",
+        "sendBinaryData": false,
+        "jsonParameters": false
+      },
+      "id": "HTTP_Fundamentals",
+      "name": "HTTP_Fundamentals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        520,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst fund = items[0].json || {};\nconst sector = fund?.General?.Sector || null;\n// original symbol from batch item:\nconst sym = $item(0).$node['Split In Batches'].json.symbol;\nreturn [{ json: { symbol: sym, sector, payload: fund } }];\n"
+      },
+      "id": "Extract_Sector",
+      "name": "Extract_Sector",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO dim_fundamentals(symbol, payload)\nVALUES (:symbol, :payload::jsonb)\nON CONFLICT(symbol) DO UPDATE SET payload = EXCLUDED.payload;\n",
+        "additionalFields": {
+          "queryParamsUi": {
+            "parameter": [
+              {
+                "name": "symbol",
+                "value": "={{$json.symbol}}"
+              },
+              {
+                "name": "payload",
+                "value": "={{JSON.stringify($json.payload)}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "PG_UpsertFundamentals",
+      "name": "PG_UpsertFundamentals",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nUPDATE dim_symbol\nSET sector = COALESCE(:sector, sector),\n    last_fundamentals_at = now()\nWHERE symbol = :symbol;\n",
+        "additionalFields": {
+          "queryParamsUi": {
+            "parameter": [
+              {
+                "name": "symbol",
+                "value": "={{$json.symbol}}"
+              },
+              {
+                "name": "sector",
+                "value": "={{$json.sector}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "PG_UpdateSector",
+      "name": "PG_UpdateSector",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1410,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 200,
+        "unit": "milliseconds"
+      },
+      "id": "Wait",
+      "name": "Wait 200ms",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        520
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule (Mon 08:00 WIB)": {
+      "main": [
+        {
+          "node": "HTTP_GetTickers",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "HTTP_GetTickers": {
+      "main": [
+        {
+          "node": "Map_Symbols",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Map_Symbols": {
+      "main": [
+        {
+          "node": "PG_UpsertSeed",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_UpsertSeed": {
+      "main": [
+        {
+          "node": "Split In Batches",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        {
+          "node": "HTTP_Fundamentals",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "HTTP_Fundamentals": {
+      "main": [
+        {
+          "node": "Extract_Sector",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Extract_Sector": {
+      "main": [
+        {
+          "node": "PG_UpsertFundamentals",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_UpsertFundamentals": {
+      "main": [
+        {
+          "node": "PG_UpdateSector",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_UpdateSector": {
+      "main": [
+        {
+          "node": "Wait 200ms",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Wait 200ms": {
+      "main": [
+        {
+          "node": "Split In Batches",
+          "type": "main",
+          "index": 1
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T09:50:27.596493Z"
+  }
+}
