@@ -1,0 +1,62 @@
+{
+  "name": "IDX - 10 Weekly Reward Score Calc [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 16,
+            "minute": 56
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH latest AS ( SELECT symbol, MAX(date) AS d FROM fact_daily_ohlcv GROUP BY symbol ),\nbase AS (\n  SELECT d.symbol, d.date, d.close, d.volume, ti.atr_14, ti.sma_20, ti.sma_50, ti.bb_up, ti.bb_dn,\n         LAG(d.close,5) OVER (PARTITION BY d.symbol ORDER BY d.date) AS close_5ago,\n         AVG(d.volume) OVER (PARTITION BY d.symbol ORDER BY d.date ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS vol20\n  FROM fact_daily_ohlcv d\n  JOIN fact_tech_indicators ti USING(symbol,date)\n  JOIN latest l ON d.symbol=l.symbol AND d.date=l.d\n),\nnorm AS (\n  SELECT symbol,\n         date_trunc('week', date)::date AS week_start,\n         LEAST(GREATEST(((close - close_5ago)/NULLIF(atr_14,0) + 5)/10,0),1) AS mom_norm,\n         LEAST(GREATEST(((sma_20 - sma_50)/NULLIF(sma_50,0) + 0.1)/0.3,0),1) AS trend_norm,\n         LEAST(GREATEST(((close - bb_dn)/NULLIF(bb_up - bb_dn,0)),0),1) AS bb_norm,\n         LEAST(GREATEST(((volume/NULLIF(vol20,1)) - 1)/1.5,0),1) AS vol_norm,\n         0.5::numeric AS sector_norm -- fallback; overridden when sector rotation table exists\n  FROM base\n)\nINSERT INTO fact_weekly_reward(symbol, week_start, mom_norm, trend_norm, bb_norm, vol_norm, sector_norm, reward_score)\nSELECT symbol, week_start, mom_norm, trend_norm, bb_norm, vol_norm, sector_norm,\n       (0.25*mom_norm + 0.25*trend_norm + 0.20*bb_norm + 0.15*sector_norm + 0.15*vol_norm)\nFROM norm\nON CONFLICT (symbol, week_start) DO UPDATE SET\n  mom_norm=EXCLUDED.mom_norm, trend_norm=EXCLUDED.trend_norm, bb_norm=EXCLUDED.bb_norm,\n  vol_norm=EXCLUDED.vol_norm, sector_norm=EXCLUDED.sector_norm, reward_score=EXCLUDED.reward_score;\n"
+      },
+      "id": "PG_Reward",
+      "name": "PG_Reward",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        600,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Reward",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.112905Z"
+  }
+}

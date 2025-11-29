@@ -1,0 +1,62 @@
+{
+  "name": "IDX - 03 Indicators Populate [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 16,
+            "minute": 50
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH base AS (\n  SELECT d.symbol, d.date, d.open, d.high, d.low, d.close, d.volume,\n         LAG(d.close) OVER (PARTITION BY d.symbol ORDER BY d.date) AS prev_close\n  FROM fact_daily_ohlcv d\n),\ntr_calc AS (\n  SELECT symbol, date,\n         GREATEST(high-low,\n                  ABS(high - COALESCE(prev_close,open)),\n                  ABS(low  - COALESCE(prev_close,open))) AS tr\n  FROM base\n),\natr14 AS (\n  SELECT symbol, date,\n         AVG(tr) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS atr_14\n  FROM tr_calc\n),\nsma AS (\n  SELECT symbol, date,\n         AVG(close) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma_20,\n         AVG(close) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) AS sma_50,\n         STDDEV_SAMP(close) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sd20,\n         close\n  FROM base\n),\nbb AS (\n  SELECT symbol, date,\n         sma_20 AS bb_mid,\n         sma_20 + 2*sd20 AS bb_up,\n         sma_20 - 2*sd20 AS bb_dn\n  FROM sma\n),\nchg AS (\n  SELECT symbol, date,\n         GREATEST(close - LAG(close) OVER (PARTITION BY symbol ORDER BY date), 0) AS gain,\n         GREATEST(LAG(close) OVER (PARTITION BY symbol ORDER BY date) - close, 0) AS loss\n  FROM base\n),\nrsi14 AS (\n  SELECT symbol, date,\n         CASE WHEN AVG(loss) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW)=0\n           THEN 100\n           ELSE 100 - 100 / (1 + (AVG(gain) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW)\n                                   / NULLIF(AVG(loss) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW),0)))\n         END AS rsi_14\n  FROM chg\n)\nINSERT INTO fact_tech_indicators(symbol,date,rsi_14,atr_14,sma_20,sma_50,bb_mid,bb_up,bb_dn)\nSELECT b.symbol, b.date, r.rsi_14, a.atr_14, s.sma_20, s.sma_50, bb.bb_mid, bb.bb_up, bb.bb_dn\nFROM (SELECT DISTINCT symbol,date FROM fact_daily_ohlcv) b\nLEFT JOIN rsi14 r ON r.symbol=b.symbol AND r.date=b.date\nLEFT JOIN atr14 a ON a.symbol=b.symbol AND a.date=b.date\nLEFT JOIN sma s ON s.symbol=b.symbol AND s.date=b.date\nLEFT JOIN bb  ON bb.symbol=b.symbol AND bb.date=b.date\nON CONFLICT (symbol,date) DO UPDATE SET\n  rsi_14=EXCLUDED.rsi_14, atr_14=EXCLUDED.atr_14,\n  sma_20=EXCLUDED.sma_20, sma_50=EXCLUDED.sma_50,\n  bb_mid=EXCLUDED.bb_mid, bb_up=EXCLUDED.bb_up, bb_dn=EXCLUDED.bb_dn;\n"
+      },
+      "id": "PG_Indicators",
+      "name": "PG_Indicators",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        600,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Indicators",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.109379Z"
+  }
+}

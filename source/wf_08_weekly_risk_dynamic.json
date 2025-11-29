@@ -1,0 +1,62 @@
+{
+  "name": "IDX - 08 Weekly Risk (Dynamic) [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 16,
+            "minute": 52
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH params AS ( SELECT * FROM v_active_norm_params ),\n     weights AS ( SELECT * FROM v_active_risk_weights ),\nbase AS (\n  SELECT ti.symbol, d.date, ti.rsi_14,\n         CASE WHEN d.close=0 THEN NULL ELSE ti.atr_14/d.close*100 END AS atr_pct,\n         COALESCE((dim_fundamentals.payload->'Highlights'->>'DebtEquity')::numeric,1.0) AS der,\n         COALESCE(ti.beta_1y,1.0) AS beta_1y\n  FROM fact_tech_indicators ti\n  JOIN fact_daily_ohlcv d USING(symbol,date)\n  LEFT JOIN dim_fundamentals USING(symbol)\n  WHERE d.date = (SELECT MAX(date) FROM fact_daily_ohlcv dd WHERE dd.symbol=ti.symbol)\n),\nnorm AS (\n  SELECT b.symbol, b.date,\n         LEAST(GREATEST((b.rsi_14 - p.rsi_low) / NULLIF(p.rsi_high - p.rsi_low,0), 0), 1) AS rsi_norm,\n         LEAST(GREATEST((b.atr_pct - p.atrp_low) / NULLIF(p.atrp_high - p.atrp_low,0), 0), 1) AS atrp_norm,\n         LEAST(GREATEST((b.beta_1y - p.beta_low) / NULLIF(p.beta_high - p.beta_low,0), 0), 1) AS beta_norm,\n         LEAST(GREATEST((b.der - p.der_low) / NULLIF(p.der_high - p.der_low,0), 0), 1) AS der_norm\n  FROM base b CROSS JOIN params p\n)\nINSERT INTO fact_weekly_risk(symbol,week_start,rsi_norm,atrp_norm,beta_norm,der_norm,score,bucket)\nSELECT n.symbol, date_trunc('week', n.date)::date,\n       n.rsi_norm, n.atrp_norm, n.beta_norm, n.der_norm,\n       (w.w_rsi*n.rsi_norm + w.w_atr*n.atrp_norm + w.w_beta*n.beta_norm + w.w_der*n.der_norm) AS score,\n       CASE\n         WHEN (w.w_rsi*n.rsi_norm + w.w_atr*n.atrp_norm + w.w_beta*n.beta_norm + w.w_der*n.der_norm) < 0.30 THEN 'LOW'\n         WHEN (w.w_rsi*n.rsi_norm + w.w_atr*n.atrp_norm + w.w_beta*n.beta_norm + w.w_der*n.der_norm) < 0.60 THEN 'MED'\n         ELSE 'HIGH'\n       END\nFROM norm n CROSS JOIN weights w\nON CONFLICT (symbol,week_start) DO UPDATE SET\n  rsi_norm=EXCLUDED.rsi_norm, atrp_norm=EXCLUDED.atrp_norm, beta_norm=EXCLUDED.beta_norm, der_norm=EXCLUDED.der_norm,\n  score=EXCLUDED.score, bucket=EXCLUDED.bucket;\n"
+      },
+      "id": "PG_Risk",
+      "name": "PG_Risk",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        600,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Risk",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.111358Z"
+  }
+}

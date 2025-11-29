@@ -1,0 +1,142 @@
+{
+  "name": "IDX - 06b Weekly Retune (TradeLog) [v1.116.2]",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "hour": 8,
+            "minute": 30
+          }
+        ],
+        "timezone": "Asia/Jakarta"
+      },
+      "id": "Schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nWITH wk AS ( SELECT date_trunc('week', CURRENT_DATE - INTERVAL '7 day')::date AS ws ),\ntr AS (\n  SELECT t.symbol, t.ts_open::date AS d_open, t.ts_close::date AS d_close, t.entry_price, t.exit_price, t.qty\n  FROM trade_log t, wk WHERE t.ts_open::date >= wk.ws AND t.ts_open::date < wk.ws + INTERVAL '5 day'\n),\nplan AS ( SELECT p.symbol, p.week_start, p.entry_min, p.entry_max, p.stop_loss, p.target_1, p.target_2 FROM fact_weekly_plan p, wk WHERE p.week_start = wk.ws ),\njoined AS (\n  SELECT p.symbol, p.week_start, p.entry_min, p.entry_max, p.stop_loss, p.target_1, p.target_2, tr.entry_price, tr.exit_price, tr.qty\n  FROM plan p LEFT JOIN tr ON tr.symbol=p.symbol\n),\nfallback_extreme AS (\n  SELECT j.symbol, j.week_start, j.entry_min, j.entry_max, j.stop_loss, j.target_1, j.target_2,\n         NULL::numeric AS entry_price, NULL::numeric AS exit_price,\n         (SELECT MIN(low) FROM fact_daily_ohlcv f WHERE f.symbol=j.symbol AND f.date>=j.week_start AND f.date<j.week_start+INTERVAL '5 day') AS min_low,\n         (SELECT MAX(high) FROM fact_daily_ohlcv f WHERE f.symbol=j.symbol AND f.date>=j.week_start AND f.date<j.week_start+INTERVAL '5 day') AS max_high\n  FROM joined j\n),\nresult AS (\n  SELECT j.symbol, j.week_start, COALESCE(j.entry_price, (j.entry_min+j.entry_max)/2) AS fill_price, j.exit_price,\n         j.stop_loss, j.target_1, j.target_2, f.min_low, f.max_high, (j.entry_min - j.stop_loss) AS risk_per_share\n  FROM joined j JOIN fallback_extreme f USING(symbol, week_start)\n)\nSELECT *, \n       CASE \n         WHEN exit_price IS NOT NULL THEN (exit_price - fill_price) / NULLIF(risk_per_share,0)\n         WHEN fill_price IS NULL THEN 0\n         WHEN max_high >= target_2 THEN 3.0 / NULLIF(risk_per_share,0)\n         WHEN max_high >= target_1 THEN 1.5 / NULLIF(risk_per_share,0)\n         WHEN min_low  <= stop_loss THEN -1.0 / NULLIF(risk_per_share,0)\n         ELSE 0 END AS R_multiple\nFROM result;\n"
+      },
+      "id": "PG_Outcomes",
+      "name": "PG_Outcomes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        500,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nWITH wk AS ( SELECT date_trunc('week', CURRENT_DATE - INTERVAL '7 day')::date AS ws )\nSELECT wr.symbol, wr.week_start, wr.rsi_norm, wr.atrp_norm, wr.beta_norm, wr.der_norm, wr.score, wr.bucket\nFROM fact_weekly_risk wr, wk WHERE wr.week_start = wk.ws;\n"
+      },
+      "id": "PG_Features",
+      "name": "PG_Features",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        500,
+        380
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction corr(a,b){\n  const n = Math.min(a.length, b.length); if (n<5) return 0;\n  let ma=0, mb=0; for (let i=0;i<n;i++){ma+=a[i]; mb+=b[i];} ma/=n; mb/=n;\n  let num=0, da=0, db=0;\n  for (let i=0;i<n;i++){ const xa=a[i]-ma, xb=b[i]-mb; num+=xa*xb; da+=xa*xa; db+=xb*xb; }\n  const den = Math.sqrt(da*db)||1; return num/den;\n}\nconst outc = $items('PG_Outcomes', 0).map(x=>x.json);\nconst feats = $items('PG_Features', 1).map(x=>x.json);\nconst mF = new Map(feats.map(f=>[f.symbol,f]));\nconst common = outc.filter(o=>mF.has(o.symbol));\nif (!common.length) return [{ json: { w_rsi:0.3, w_atr:0.3, w_beta:0.2, w_der:0.2, note:'no data' } }];\nconst rsi=[], atr=[], beta=[], der=[], R=[];\nfor (const o of common){\n  const f=mF.get(o.symbol);\n  if ([f.rsi_norm,f.atrp_norm,f.beta_norm,f.der_norm,o.R_multiple].some(v=>v==null)) continue;\n  rsi.push(f.rsi_norm); atr.push(f.atrp_norm); beta.push(f.beta_norm); der.push(f.der_norm); R.push(o.R_multiple);\n}\nif (R.length<5) return [{ json: { w_rsi:0.3, w_atr:0.3, w_beta:0.2, w_der:0.2, note:'few samples' } }];\nconst clamp=x=>Math.min(0.5,Math.max(0.1,x));\nfunction pos(v){ return Math.max(0,v); }\nlet cr=pos(corr(rsi,R)), ca=pos(corr(atr,R)), cb=pos(corr(beta,R)), cd=pos(corr(der,R));\nlet sum = cr+ca+cb+cd; if (sum===0) sum=1;\nlet wr=cr/sum, wa=ca/sum, wb=cb/sum, wd=cd/sum;\nwr=clamp(wr); wa=clamp(wa); wb=clamp(wb); wd=clamp(wd);\nconst s2=wr+wa+wb+wd; wr/=s2; wa/=s2; wb/=s2; wd/=s2;\nreturn [{ json: { w_rsi:wr, w_atr:wa, w_beta:wb, w_der:wd, note:'auto-tuned via tradelog' } }];\n"
+      },
+      "id": "Fn_Tune",
+      "name": "Fn_Tune",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nINSERT INTO model_config_risk_weights(effective_from, w_rsi, w_atr, w_beta, w_der, note)\nVALUES (date_trunc('week', CURRENT_DATE)::date + INTERVAL '7 day', :w_rsi, :w_atr, :w_beta, :w_der, :note)\nON CONFLICT (effective_from) DO UPDATE\nSET w_rsi=EXCLUDED.w_rsi, w_atr=EXCLUDED.w_atr, w_beta=EXCLUDED.w_beta, w_der=EXCLUDED.w_der, note=EXCLUDED.note;\n"
+      },
+      "id": "PG_UpsertW",
+      "name": "PG_UpsertW",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PG_CREDENTIAL_ID",
+          "name": "Postgres (IDX)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        {
+          "node": "PG_Outcomes",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_Outcomes": {
+      "main": [
+        {
+          "node": "Fn_Tune",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "PG_Features": {
+      "main": [
+        {
+          "node": "Fn_Tune",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    },
+    "Fn_Tune": {
+      "main": [
+        {
+          "node": "PG_UpsertW",
+          "type": "main",
+          "index": 0
+        }
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "staticData": null,
+  "meta": {
+    "instanceId": "template",
+    "exportedAt": "2025-10-26T07:27:57.115129Z"
+  }
+}
